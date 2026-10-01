@@ -5,6 +5,7 @@ Endpoints (JSON):
   GET    /api/nas/list?path=sub/dir       token
   GET    /api/nas/download?path=a/b.txt   token
   PUT    /api/nas/upload?path=a/b.txt     token, cuerpo crudo (Content-Length obligatorio)
+  POST   /api/nas/mkdir?path=a/b           token
   DELETE /api/nas/delete?path=a/b.txt     token (archivo o directorio vacio)
 
 Token: cabecera "Authorization: Bearer <token>" o "X-Token: <token>".
@@ -201,7 +202,26 @@ class Handler(BaseHTTPRequestHandler):
         self._send(201, {"path": rel, "size": os.path.getsize(target)})
 
     do_PUT = _upload
-    do_POST = _upload
+
+    def do_POST(self):
+        path, q = self._query()
+        if path != "/api/nas/mkdir":
+            return self._upload()
+        if not self._gate(True):
+            return
+        rel = q.get("path", "")
+        target = self._resolve(rel)
+        if not rel or target is None or target == os.path.realpath(_state["root"]):
+            return self._err(400, "invalid path")
+        try:
+            os.mkdir(target)
+        except FileExistsError:
+            return self._err(409, "already exists")
+        except FileNotFoundError:
+            return self._err(404, "parent directory not found")
+        except OSError as exc:
+            return self._err(409, str(exc))
+        self._send(201, {"path": rel})
 
     def do_DELETE(self):
         path, q = self._query()
