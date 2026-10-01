@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
     private int screen;
     private String currentPath = "";
     private String pendingDownloadName = "download";
+    private String healthSummary = "Estado API: consultando";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -172,7 +173,7 @@ public class MainActivity extends Activity {
                 + "\nPostgreSQL: puerto " + PgService.PG_PORT
                 + "\nNAS API: http://<ip>:" + PgService.API_PORT
                 + "\nCarpeta: " + PgService.NAS_PUBLIC + "\n\n"
-                + "Log reciente:\n" + tail(PgService.logTail(), 1200);
+                + healthSummary + "\n\nLog reciente:\n" + tail(PgService.logTail(), 1200);
     }
 
     private void refreshHealth() {
@@ -184,12 +185,18 @@ public class MainActivity extends Activity {
                         + "\nAlmacenamiento NAS: " + (health.optBoolean("nas_writable") ? "escribible" : "solo lectura")
                         + "\nAntiguedad del servicio: " + health.optLong("uptime_s") + " s";
                 runOnUiThread(() -> {
+                    healthSummary = message;
                     if (screen == 0) {
-                        statusText.setText(statusSummary() + "\n" + message);
+                        statusText.setText(statusSummary());
                     }
                 });
             } catch (Exception e) {
-                runOnUiThread(() -> toast("No se pudo consultar el NAS: " + e.getMessage()));
+                runOnUiThread(() -> {
+                    healthSummary = "Estado API: error de conexion (" + e.getMessage() + ")";
+                    if (screen == 0) {
+                        statusText.setText(statusSummary());
+                    }
+                });
             }
         });
     }
