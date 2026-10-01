@@ -1,0 +1,37 @@
+name: build-apk
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - id: ndk
+        uses: nttld/setup-ndk@v1
+        with: { ndk-version: r27d }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.9' }
+      - name: Android SDK 34
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+      - name: Tests (shmem + fetch)
+        run: |
+          tests/test_shmem.sh
+          tests/test_fetch.sh
+      - name: Build APK
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          CHAQUOPY_BUILD_PYTHON: python3.12
+        run: scripts/build-c67.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: c67-db-nas-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk

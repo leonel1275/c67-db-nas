@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace 'com.systutor.g5'
+    compileSdk 34
+
+    defaultConfig {
+        // 10 caracteres, IGUAL de largo que "com.termux": los binarios de Termux llevan
+        // /data/data/com.termux/files/usr y scripts/fetch_termux.py lo reescribe a
+        // /data/data/com.c67.pg/files/usr SIN cambiar el largo. No lo cambies.
+        applicationId "com.c67.pg"
+        minSdk 26
+        targetSdk 34
+        versionCode 2
+        versionName "2.0"
+        ndk {
+            // Solo arm64: las libs de PostgreSQL son aarch64 (x86_64 no tendria binarios).
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            // extractNativeLibs=true: libpostgres.so / libinitdb.so deben existir como
+            // archivos en disco para poder hacer exec().
+            useLegacyPackaging = true
+        }
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version = "3.12"
+        // Solo se usa para compilar .py a .pyc; la app no instala paquetes pip.
+        buildPython(System.getenv("CHAQUOPY_BUILD_PYTHON") ?: "python3.12")
+    }
+}
