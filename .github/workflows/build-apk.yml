@@ -24,13 +24,14 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
       - name: Tests (shmem + fetch)
         run: |
-          tests/test_shmem.sh
-          tests/test_fetch.sh
+          chmod +x tests/test_shmem.sh tests/test_fetch.sh scripts/build-c67.sh scripts/build-shmem-fix.sh scripts/verify-g0-g3.sh
+          bash tests/test_shmem.sh
+          bash tests/test_fetch.sh
       - name: Build APK
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           CHAQUOPY_BUILD_PYTHON: python3.12
-        run: scripts/build-c67.sh
+        run: bash scripts/build-c67.sh
       - uses: actions/upload-artifact@v4
         with:
           name: c67-db-nas-apk
