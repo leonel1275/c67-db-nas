@@ -214,15 +214,30 @@ public class PgService extends Service {
         }
         new File(files, "tmp").mkdirs();   // TMPDIR de postgres y del shim de shmem
 
-        // initdb necesita un "postgres" HERMANO en su propio directorio. Android solo permite
-        // exec() desde nativeLibraryDir, asi que: copia de initdb (se ejecuta con linker64) +
-        // symlink postgres -> libpostgres.so, ambos en files/usr/bin (ver runInitdb).
+        // Si postgres todavía es un symlink de una versión anterior, forzar re-copia.
+        File binLegacy = new File(new File(files, "usr"), "bin");
+        File pgLegacy = new File(binLegacy, "postgres");
+        if (Files.isSymbolicLink(pgLegacy.toPath())) {
+            log("detectado postgres symlink (version antigua) -> borrando para reemplazar con copia real");
+            Files.deleteIfExists(pgLegacy.toPath());
+            new File(binLegacy, "initdb").delete();
+        }
+
+        // initdb necesita un "postgres" HERMANO en su propio directorio.
+        // IMPORTANTE: NO usar symlinks — SELinux en Android bloquea exec() de symlinks
+        // fuera de nativeLibraryDir. Ambos deben ser copias reales con +x.
         File bin = new File(usr, "bin");
         bin.mkdirs();
-        copyIfDifferent(new File(nativeDir, "libinitdb.so"), new File(bin, "initdb"));
-        File link = new File(bin, "postgres");
-        Files.deleteIfExists(link.toPath());
-        Files.createSymbolicLink(link.toPath(), new File(nativeDir, "libpostgres.so").toPath());
+        File initdbBin = new File(bin, "initdb");
+        File postgresBin = new File(bin, "postgres");
+        // Borrar cualquier symlink o archivo viejo
+        Files.deleteIfExists(initdbBin.toPath());
+        Files.deleteIfExists(postgresBin.toPath());
+        // Copiar como archivos reales
+        copyBin(new File(nativeDir, "libinitdb.so"), initdbBin);
+        copyBin(new File(nativeDir, "libpostgres.so"), postgresBin);
+        log("bin listo: initdb size=" + initdbBin.length() + " exec=" + initdbBin.canExecute() + " path=" + initdbBin);
+        log("bin listo: postgres size=" + postgresBin.length() + " exec=" + postgresBin.canExecute() + " path=" + postgresBin);
     }
 
     private File prepareNas() {
@@ -505,6 +520,24 @@ public class PgService extends Service {
             }
         }
         dst.setReadable(true, true);
+    }
+
+    /** Copia src -> dst y fuerza permisos de ejecución (Java + chmod). */
+    private static void copyBin(File src, File dst) throws IOException {
+        try (InputStream in = Files.newInputStream(src.toPath());
+             OutputStream o = new FileOutputStream(dst)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                o.write(buf, 0, n);
+            }
+        }
+        dst.setReadable(true, true);
+        dst.setExecutable(true, false);   // +x para todos (necesario para linker64)
+        // Doble seguro con chmod vía shell (algunos ROMs ignoran setExecutable en /data)
+        try {
+            Runtime.getRuntime().exec(new String[]{"chmod", "755", dst.getAbsolutePath()}).waitFor();
+        } catch (Throwable ignored) {}
     }
 
     private void extractZip(String asset, File dest) throws IOException {
