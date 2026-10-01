@@ -33,8 +33,14 @@ scripts/verify-g0-g3.sh 100.x.y.z   # G0 exec, G1 initdb, G2 puertos, G3 API
 ```
 
 ## Uso
-Al abrir la app ves IPs, password de Postgres (`postgres`) y token NAS. Tocá los botones 1 y 2
-(acceso a archivos y exención de batería) y luego *Detener todo* + abrir otra vez.
+La app Android incluye pantallas de estado del servicio, explorador NAS (listar, crear carpetas,
+subir, descargar y borrar archivos), datos de conexión PostgreSQL y ajustes de permisos/servicio.
+Usa componentes nativos y el selector de archivos de Android; conserva el mínimo Android 8 y el
+soporte arm64. Para administrar desde otro dispositivo sigue disponible la API HTTP.
+
+La contraseña inicial de Postgres y el token NAS se generan en el teléfono; los datos de conexión
+se pueden copiar desde la pantalla PostgreSQL. La carpeta compartida sigue siendo
+`/storage/emulated/0/NAS` cuando se otorga acceso a todos los archivos.
 ```
 psql -h 100.x.y.z -U postgres        # o DBeaver
 curl -H "Authorization: Bearer TOKEN" http://100.x.y.z:8000/api/nas/list
@@ -49,4 +55,3 @@ Cambiar password: `ALTER USER postgres PASSWORD '...';` (la app solo muestra la 
 - **G2 (Puertos):** PostgreSQL escuchando en `0.0.0.0:5432` con `scram-sha-256`. Comprobada conexión TCP remota.
 - **G3 (NAS API):** HTTP API escuchando en `0.0.0.0:8000`. Verificados endpoints `/api/health`, `/api/nas/list`, `upload` y `download`.
 - **G4 (Persistencia):** Foreground service persistente con WakeLock y recuperación tras reinicio.
-

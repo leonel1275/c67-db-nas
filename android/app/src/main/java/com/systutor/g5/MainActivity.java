@@ -216,15 +216,16 @@ public class MainActivity extends Activity {
     }
 
     private void listFiles() {
+        String requestedPath = currentPath;
         io.execute(() -> {
             try {
-                JSONObject result = api("GET", "/api/nas/list?path=" + enc(currentPath), null, -1);
+                JSONObject result = api("GET", "/api/nas/list?path=" + enc(requestedPath), null, -1);
                 JSONArray items = result.getJSONArray("items");
                 runOnUiThread(() -> {
-                    if (screen != 1) {
+                    if (screen != 1 || !requestedPath.equals(currentPath)) {
                         return;
                     }
-                    int fixedViews = currentPath.isEmpty() ? 4 : 5;
+                    int fixedViews = requestedPath.isEmpty() ? 4 : 5;
                     while (content.getChildCount() > fixedViews) {
                         content.removeViewAt(fixedViews);
                     }
