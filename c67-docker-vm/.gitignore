@@ -1,0 +1,8 @@
+vm/*.qcow2
+vm/*.tar.gz
+vm/rootfs-test/
+*.log
+../benchmark*.py
+../c67_stress*
+../device_info*
+../db.json
