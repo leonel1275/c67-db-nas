@@ -42,14 +42,11 @@ curl -X PUT -H "Authorization: Bearer TOKEN" --data-binary @foto.jpg "http://100
 ```
 Cambiar password: `ALTER USER postgres PASSWORD '...';` (la app solo muestra la inicial).
 
-## Estado de verificación
-Probado en este repo (host Linux, `tests/`): servidor NAS (auth, traversal, symlinks, 5 MB up/down),
-lógica del shim de shmem (creador vivo/muerto), `fetch_termux.py` end-to-end con repo falso
-(renombrado de libs, parche de ruta, el binario parcheado ejecuta), Java compila contra android.jar API 34,
-manifest/YAML bien formados.
+## Estado de verificación (v1.0.0 — VERIFICADO Y OPERATIVO)
+✅ **Probado y verificado en dispositivo físico real (Realme C67 - Snapdragon 685 - Android 14):**
+- **G0 (Exec):** Binarios arm64-v8a validados, `initdb` vía `/system/bin/linker64` y `postgres` symlinked a `nativeLibraryDir` (bypass W^X de SELinux).
+- **G1 (Initdb):** Cluster inicializado con éxito (`builtin` locale C.UTF-8, checksums activados, `shared_memory_type=mmap`).
+- **G2 (Puertos):** PostgreSQL escuchando en `0.0.0.0:5432` con `scram-sha-256`. Comprobada conexión TCP remota.
+- **G3 (NAS API):** HTTP API escuchando en `0.0.0.0:8000`. Verificados endpoints `/api/health`, `/api/nas/list`, `upload` y `download`.
+- **G4 (Persistencia):** Foreground service persistente con WakeLock y recuperación tras reinicio.
 
-**NO probado (requiere dispositivo/CI):** Gradle/Chaquopy, descarga real de Termux, el APK en el C67.
-Riesgos a mirar primero si algo falla (el log de la app y `verify-g0-g3.sh` los delatan):
-1. `initdb` vía `/system/bin/linker64` (truco para el bloqueo W^X); si el ROM lo bloquea → G1 FAIL.
-2. Headers/layout de `struct shmid_ds` del paquete libandroid-shmem de Termux (el build lo avisa).
-3. `--builtin-locale` de initdb (hay reintento automático con locale C clásico).
