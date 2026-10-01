@@ -214,30 +214,39 @@ public class PgService extends Service {
         }
         new File(files, "tmp").mkdirs();   // TMPDIR de postgres y del shim de shmem
 
-        // Si postgres todavía es un symlink de una versión anterior, forzar re-copia.
-        File binLegacy = new File(new File(files, "usr"), "bin");
-        File pgLegacy = new File(binLegacy, "postgres");
-        if (Files.isSymbolicLink(pgLegacy.toPath())) {
-            log("detectado postgres symlink (version antigua) -> borrando para reemplazar con copia real");
-            Files.deleteIfExists(pgLegacy.toPath());
-            new File(binLegacy, "initdb").delete();
-        }
-
-        // initdb necesita un "postgres" HERMANO en su propio directorio.
-        // IMPORTANTE: NO usar symlinks — SELinux en Android bloquea exec() de symlinks
-        // fuera de nativeLibraryDir. Ambos deben ser copias reales con +x.
+        // initdb necesita un "postgres" HERMANO en su propio directorio (usr/bin).
+        // - initdb se ejecuta con /system/bin/linker64 (W^X bypass) pero comprueba
+        //   su propio bit +x, por lo que DEBE ser una copia real con chmod 755 (copyBin).
+        // - postgres NO puede ser una copia en /data/data porque SELinux bloquea execve()
+        //   en app_data_file. postgres DEBE ser un SYMLINK a libpostgres.so en nativeLibraryDir,
+        //   donde SELinux sí permite execve() (apk_data_file).
         File bin = new File(usr, "bin");
         bin.mkdirs();
         File initdbBin = new File(bin, "initdb");
         File postgresBin = new File(bin, "postgres");
-        // Borrar cualquier symlink o archivo viejo
-        Files.deleteIfExists(initdbBin.toPath());
-        Files.deleteIfExists(postgresBin.toPath());
-        // Copiar como archivos reales
+
+        // 1. initdb: copia real ejecutable (+x)
         copyBin(new File(nativeDir, "libinitdb.so"), initdbBin);
-        copyBin(new File(nativeDir, "libpostgres.so"), postgresBin);
+
+        // 2. postgres: symlink a libpostgres.so en nativeLibraryDir
+        if (postgresBin.exists() || Files.isSymbolicLink(postgresBin.toPath())) {
+            try {
+                Files.delete(postgresBin.toPath());
+            } catch (Throwable t) {
+                postgresBin.delete();
+            }
+        }
+        try {
+            Files.createSymbolicLink(postgresBin.toPath(), new File(nativeDir, "libpostgres.so").toPath());
+        } catch (Throwable t) {
+            try {
+                Runtime.getRuntime().exec(new String[]{"ln", "-sf",
+                        new File(nativeDir, "libpostgres.so").getAbsolutePath(),
+                        postgresBin.getAbsolutePath()}).waitFor();
+            } catch (Throwable ignored) {}
+        }
         log("bin listo: initdb size=" + initdbBin.length() + " exec=" + initdbBin.canExecute() + " path=" + initdbBin);
-        log("bin listo: postgres size=" + postgresBin.length() + " exec=" + postgresBin.canExecute() + " path=" + postgresBin);
+        log("bin listo: postgres symlink=" + Files.isSymbolicLink(postgresBin.toPath()) + " target=" + new File(nativeDir, "libpostgres.so"));
     }
 
     private File prepareNas() {
@@ -260,6 +269,8 @@ public class PgService extends Service {
         env.put("TMPDIR", new File(files, "tmp").getAbsolutePath());   // el shim de shmem lo lee en runtime
         env.put("HOME", files.getAbsolutePath());
         env.put("TZ", "UTC");
+        String existingPath = env.getOrDefault("PATH", "/system/bin:/system/xbin");
+        env.put("PATH", nativeDir.getAbsolutePath() + ":" + existingPath);
         return env;
     }
 
@@ -289,8 +300,9 @@ public class PgService extends Service {
     private int runInitdb(File files, File nativeDir, File pgdata, File passFile, boolean builtin)
             throws Exception {
         deleteTree(pgdata);
+
         List<String> cmd = new ArrayList<>();
-        // linker64 ejecuta el initdb copiado en files/: evita el bloqueo W^X de Android 10+.
+        // linker64 ejecuta initdb desde files/usr/bin (W^X bypass).
         cmd.add("/system/bin/linker64");
         cmd.add(new File(files, "usr/bin/initdb").getAbsolutePath());
         cmd.addAll(Arrays.asList("-D", pgdata.getAbsolutePath(), "-U", "postgres",
