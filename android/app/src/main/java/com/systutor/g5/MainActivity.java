@@ -226,8 +226,19 @@ public class MainActivity extends Activity {
         String requestedPath = currentPath;
         io.execute(() -> {
             try {
-                JSONObject result = api("GET", "/api/nas/list?path=" + enc(requestedPath), null, -1);
-                JSONArray items = result.getJSONArray("items");
+                JSONArray items = new JSONArray();
+                int offset = 0;
+                boolean hasMore;
+                do {
+                    JSONObject result = api("GET", "/api/nas/list?path=" + enc(requestedPath)
+                            + "&limit=500&offset=" + offset, null, -1);
+                    JSONArray page = result.getJSONArray("items");
+                    for (int i = 0; i < page.length(); i++) {
+                        items.put(page.get(i));
+                    }
+                    offset += page.length();
+                    hasMore = result.optBoolean("has_more");
+                } while (hasMore);
                 runOnUiThread(() -> {
                     if (screen != 1 || !requestedPath.equals(currentPath)) {
                         return;

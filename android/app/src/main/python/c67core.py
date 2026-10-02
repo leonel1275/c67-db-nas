@@ -25,6 +25,7 @@ import socket
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
@@ -33,20 +34,44 @@ CHUNK = 1 << 20
 DEFAULT_MAX_UPLOAD_BYTES = 1 << 30
 MIN_FREE_BYTES = 64 << 20
 UPLOAD_IDLE_TIMEOUT_SECONDS = 60
+LIST_DEFAULT_LIMIT = 100
+LIST_MAX_LIMIT = 500
+TRASH_DIRNAME = ".c67-trash"
+TRASH_RETENTION_SECONDS = 30 * 24 * 60 * 60
 UI_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 UI_SESSION_LIMIT = 64
 LOG_MAX_BYTES = 512 << 10
 LOG_BACKUP_COUNT = 3
 _WEB_LOGIN = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>C67 NAS</title><style>body{font:16px system-ui;max-width:32rem;margin:12vh auto;padding:1rem;background:#f3f5f8;color:#17202a}main{background:white;padding:2rem;border-radius:1rem;box-shadow:0 4px 24px #0001}input,button{font:inherit;padding:.7rem;width:100%;box-sizing:border-box;margin:.4rem 0}button{cursor:pointer}#err{color:#a00}</style><main><h1>C67 NAS</h1><p>Ingresa el token NAS que muestra la aplicación Android.</p><form id="login"><input id="token" type="password" autocomplete="current-password" required placeholder="Token NAS"><button>Entrar</button></form><p id="err" role="alert"></p></main><script>document.querySelector('#login').onsubmit=async e=>{e.preventDefault();let r=await fetch('/ui/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.querySelector('#token').value})});if(r.ok)location.replace('/');else document.querySelector('#err').textContent='Token no válido o acceso no permitido.'}</script></html>"""
-_WEB_APP = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>C67 NAS</title><style>body{font:16px system-ui;max-width:64rem;margin:auto;padding:1rem;background:#f3f5f8;color:#17202a}header,.toolbar,.item{display:flex;gap:.6rem;align-items:center;justify-content:space-between;flex-wrap:wrap}button{cursor:pointer;padding:.55rem .8rem}main{background:white;padding:1rem;border-radius:1rem}#items{list-style:none;padding:0}.item{border-bottom:1px solid #ddd;padding:.6rem 0}.name{overflow-wrap:anywhere;flex:1}#msg{white-space:pre-wrap;color:#8a2d00}.item button{margin-left:.25rem}</style><header><h1>C67 NAS</h1><button id="logout">Cerrar sesión</button></header><main><p id="where"></p><div class="toolbar"><button id="up">↑ Subir</button><button id="mkdir">Nueva carpeta</button><button id="refresh">Actualizar</button><input id="files" type="file" multiple hidden></div><p id="msg" role="status"></p><ul id="items"></ul></main><script>
-let path='',maxUpload=1073741824;const $=s=>document.querySelector(s), enc=s=>encodeURIComponent(s), msg=s=>$('#msg').textContent=s;
-async function api(method,url,body){let r=await fetch('/api/nas/'+url,{method,body});let data;if(r.status===204)data={};else{try{data=await r.json()}catch(_){data={}}}if(!r.ok)throw Error(data.error?.message||data.error||('HTTP '+r.status));return data}
-async function list(){msg('Cargando…');$('#where').textContent='/'+path;try{let d=await api('GET','list?path='+enc(path));$('#items').replaceChildren();for(let x of d.items){let li=document.createElement('li');li.className='item';let n=document.createElement('span');n.className='name';n.textContent=(x.is_dir?'📁 ':'📄 ')+x.name+(x.is_dir?'':' · '+x.size+' bytes');if(x.is_dir)n.onclick=()=>{path=path?path+'/'+x.name:x.name;list()};li.append(n);if(!x.is_dir){let b=document.createElement('button');b.textContent='Descargar';b.onclick=()=>download(x.name);li.append(b)}let del=document.createElement('button');del.textContent='Borrar';del.onclick=()=>remove(x.name,x.is_dir);li.append(del);$('#items').append(li)}if(path){let li=document.createElement('li'),b=document.createElement('button');b.textContent='← Carpeta superior';b.onclick=()=>{path=path.includes('/')?path.slice(0,path.lastIndexOf('/')):'';list()};li.append(b);$('#items').prepend(li)}msg(d.items.length?'':'Carpeta vacía')}catch(e){msg(e.message)}}
-async function download(name){try{msg('Descargando…');let r=await fetch('/api/nas/download?path='+enc(path?path+'/'+name:name));if(!r.ok){let x=await r.json();throw Error(x.error?.message||x.error||('HTTP '+r.status))}let a=document.createElement('a'),u=URL.createObjectURL(await r.blob());a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);msg('Descarga iniciada')}catch(e){msg(e.message)}}
-async function remove(name,dir){if(!confirm('¿Eliminar '+(dir?'la carpeta vacía ':'el archivo ')+name+'?'))return;try{await api('DELETE','delete?path='+enc(path?path+'/'+name:name));await list()}catch(e){msg(e.message)}}
-$('#refresh').onclick=list;$('#up').onclick=()=>$('#files').click();$('#mkdir').onclick=async()=>{let name=prompt('Nombre de la carpeta');if(!name)return;if(name.includes('/')||name==='.'||name==='..'){msg('Nombre no válido');return}try{await api('POST','mkdir?path='+enc(path?path+'/'+name:name));list()}catch(e){msg(e.message)}};
-$('#files').onchange=async e=>{for(let f of e.target.files){try{if(f.size>maxUpload)throw Error('El archivo supera el límite configurado de '+maxUpload+' bytes');msg('Subiendo '+f.name+'…');await api('PUT','upload?path='+enc(path?path+'/'+f.name:f.name),f)}catch(x){msg(x.message);break}}e.target.value='';list()};
-$('#logout').onclick=async()=>{await fetch('/ui/logout',{method:'POST'});location.replace('/')};fetch('/api/health').then(r=>r.json()).then(x=>maxUpload=x.max_upload_bytes||maxUpload);list();
+_WEB_APP = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>C67 NAS</title><style>
+body{font:16px system-ui;max-width:70rem;margin:auto;padding:1rem;background:#f3f5f8;color:#17202a}header,.toolbar,.item,.transfer{display:flex;gap:.6rem;align-items:center;justify-content:space-between;flex-wrap:wrap}button,select,input{font:inherit;padding:.55rem}button{cursor:pointer}main{background:white;padding:1rem;border-radius:1rem;margin:.7rem 0}#items,#queue{list-style:none;padding:0}.item,.transfer{border-bottom:1px solid #ddd;padding:.65rem 0}.name{overflow-wrap:anywhere;flex:1}.item button{margin-left:.25rem}.name.dir{cursor:pointer;color:#075d9b}#msg{white-space:pre-wrap;color:#8a2d00}progress{width:min(20rem,55vw)}#drop{padding:1.2rem;border:2px dashed #8aa;border-radius:.7rem;text-align:center}#drop.over{background:#e3f3ff}
+</style><header><h1>C67 NAS</h1><button id="logout">Cerrar sesión</button></header>
+<main><p id="where"></p><div class="toolbar"><button id="up">Subir archivos</button><button id="mkdir">Nueva carpeta</button><button id="refresh">Actualizar</button><button id="trash">Papelera</button><button id="emptyTrash" hidden>Vaciar papelera</button><select id="sort"><option value="name">Nombre</option><option value="size">Tamaño</option><option value="mtime">Fecha</option></select><select id="direction"><option value="asc">Ascendente</option><option value="desc">Descendente</option></select><input id="search" type="search" placeholder="Buscar en esta carpeta"><input id="files" type="file" multiple hidden></div>
+<div id="drop" tabindex="0">Arrastra archivos aquí para subirlos. Máximo por archivo: <span id="limit"></span>. Espacio libre aprox.: <span id="free"></span>.</div><p>El espacio disponible puede cambiar durante la subida.</p><p id="msg" role="status"></p><ul id="items"></ul><button id="more" hidden>Mostrar más</button></main>
+<main><h2>Transferencias</h2><ul id="queue"></ul></main><script>
+let path='',maxUpload=1073741824,page=0,hasMore=false,inTrash=false,queueId=0,listing=[],searchTimer;
+const $=s=>document.querySelector(s),enc=s=>encodeURIComponent(s),msg=s=>$('#msg').textContent=s;
+const size=n=>n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KiB`:n<1073741824?`${(n/1048576).toFixed(1)} MiB`:`${(n/1073741824).toFixed(2)} GiB`;
+async function api(method,url,body){let r=await fetch('/api/nas/'+url,{method,body});let d={};try{d=await r.json()}catch(_){}if(!r.ok)throw Error(d.error?.message||d.error||('HTTP '+r.status));return d}
+function query(){return `path=${enc(path)}&limit=100&offset=${page*100}&sort=${$('#sort').value}&direction=${$('#direction').value}&search=${enc($('#search').value)}`}
+async function list(reset=true){if(reset){page=0;listing=[]}inTrash=false;$('#emptyTrash').hidden=true;msg('Cargando…');renderCrumbs();try{let d=await api('GET','list?'+query());listing=reset?d.items:listing.concat(d.items);hasMore=d.has_more;render();$('#more').hidden=!hasMore;msg(listing.length?'':'Carpeta vacía')}catch(e){msg(e.message)}}
+function renderCrumbs(){let el=$('#where');el.replaceChildren();let root=document.createElement('button');root.textContent='NAS';root.onclick=()=>{path='';list()};el.append(root);let sofar='';for(let part of path.split('/').filter(Boolean)){sofar=sofar?sofar+'/'+part:part;let current=sofar,b=document.createElement('button');b.textContent=' / '+part;b.onclick=()=>{path=current;list()};el.append(b)}}
+function render(){let ul=$('#items');ul.replaceChildren();for(let x of listing){let li=document.createElement('li');li.className='item';let n=document.createElement('span');n.className='name '+(x.is_dir?'dir':'');n.textContent=(x.is_dir?'📁 ':'📄 ')+x.name+(x.is_dir?'':` · ${size(x.size)}`);if(x.is_dir)n.onclick=()=>{path=path?path+'/'+x.name:x.name;list()};li.append(n);if(!x.is_dir){let b=document.createElement('button');b.textContent='Descargar';b.onclick=()=>download(x.name);li.append(b)}let del=document.createElement('button');del.textContent='Papelera';del.setAttribute('aria-label','Mover a papelera: '+x.name);del.onclick=()=>remove(x.name);li.append(del);ul.append(li)}if(path){let li=document.createElement('li'),b=document.createElement('button');b.textContent='← Carpeta superior';b.onclick=()=>{path=path.includes('/')?path.slice(0,path.lastIndexOf('/')):'';list()};ul.prepend(li);li.append(b)}}
+function download(name){let a=document.createElement('a');a.href='/api/nas/download?path='+enc(path?path+'/'+name:name);a.download=name;a.click();msg('Descarga iniciada: '+name)}
+function xhrUpload(file,retry=false){return new Promise((resolve,reject)=>{let id=++queueId,li=document.createElement('li');li.className='transfer';let label=document.createElement('span');label.textContent=file.name;let progress=document.createElement('progress');progress.max=100;progress.value=0;let state=document.createElement('span');state.textContent='Preparando';let cancel=document.createElement('button');cancel.textContent='Cancelar';let again=document.createElement('button');again.textContent='Reintentar';again.hidden=true;li.append(label,progress,state,cancel,again);$('#queue').prepend(li);let xhr=new XMLHttpRequest(),dest=path?path+'/'+file.name:file.name,cancelled=false;
+const start=overwrite=>{if(file.size>maxUpload){state.textContent='Excede límite '+size(maxUpload);cancel.hidden=true;reject(Error(state.textContent));return}state.textContent=retry?'Reintentando':'Subiendo';cancel.hidden=false;again.hidden=true;xhr=new XMLHttpRequest();xhr.open('PUT','/api/nas/upload?path='+enc(dest)+'&overwrite='+(overwrite?'1':'0'));xhr.withCredentials=true;xhr.upload.onprogress=e=>{if(e.lengthComputable){progress.value=e.loaded/e.total*100;state.textContent=`${size(e.loaded)} / ${size(e.total)} (${Math.round(progress.value)}%)`}};xhr.onload=()=>{cancel.hidden=true;if(xhr.status>=200&&xhr.status<300){state.textContent='Completado';progress.value=100;resolve()}else{let d={};try{d=JSON.parse(xhr.responseText)}catch(_){}let error=d.error?.message||'HTTP '+xhr.status;if(xhr.status===409){state.textContent='Ya existe';if(confirm(file.name+' ya existe. ¿Reemplazarlo?'))start(true);else if(confirm('¿Guardar como otro nombre?')){let name=prompt('Nuevo nombre',file.name);if(name){dest=path?path+'/'+name:name;start(false)}else{state.textContent='Cancelado';resolve()}}else{state.textContent='Cancelado';resolve()}}else{state.textContent=error;again.hidden=false;reject(Error(error))}}};xhr.onerror=()=>failed('Conexión interrumpida');xhr.onabort=()=>{state.textContent=cancelled?'Cancelado':'Cancelado';cancel.hidden=true;if(!cancelled)again.hidden=false;cancelled=false;resolve()};xhr.send(file)};
+function failed(text){state.textContent=text;cancel.hidden=true;again.hidden=false;reject(Error(text))}
+cancel.onclick=()=>{cancelled=true;xhr.abort()};again.onclick=()=>{retry=true;start(false)};start(false)})}
+async function uploadFiles(files){for(const f of files){try{await xhrUpload(f)}catch(e){msg(f.name+': '+e.message)}}await list()}
+async function remove(name){if(!confirm('Mover '+name+' a la papelera? Se podrá restaurar durante 30 días.'))return;try{await api('POST','trash?path='+enc(path?path+'/'+name:name));await list()}catch(e){msg(e.message)}}
+async function showTrash(){inTrash=true;path='';$('#where').textContent='Papelera (retención 30 días)';$('#items').replaceChildren();$('#emptyTrash').hidden=false;$('#more').hidden=true;try{let d=await api('GET','trash');$('#where').textContent=`Papelera (retención ${d.retention_days} días) · espacio usado aprox.: ${size(d.total_bytes)}`;for(let x of d.items){let li=document.createElement('li');li.className='item';let n=document.createElement('span');n.className='name';n.textContent=(x.is_dir?'📁 ':'📄 ')+x.name+' — '+x.original_path+' — '+size(x.size)+' — eliminado '+new Date(x.deleted_at*1000).toLocaleString();li.append(n);let r=document.createElement('button');r.textContent='Restaurar';r.onclick=async()=>{try{await api('POST','trash/restore?id='+enc(x.id));showTrash()}catch(e){msg(e.message)}};li.append(r);$('#items').append(li)}msg(d.items.length?'':'Papelera vacía')}catch(e){msg(e.message)}}
+async function emptyTrash(){if(!confirm('Vaciar la papelera permanentemente?'))return;try{await api('PATCH','trash');showTrash()}catch(e){msg(e.message)}}
+$('#refresh').onclick=()=>inTrash?showTrash():list();$('#more').onclick=()=>{page++;list(false)};$('#up').onclick=()=>$('#files').click();$('#files').onchange=e=>uploadFiles([...e.target.files]);$('#trash').onclick=showTrash;$('#emptyTrash').onclick=emptyTrash;
+$('#mkdir').onclick=async()=>{let n=prompt('Nombre de la carpeta');if(!n)return;if(n.includes('/')||n==='.'||n==='..'){msg('Nombre no válido');return}try{await api('POST','mkdir?path='+enc(path?path+'/'+n:n));list()}catch(e){msg(e.message)}};
+$('#sort').onchange=()=>list();$('#direction').onchange=()=>list();$('#search').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>list(),250)};
+const drop=$('#drop');drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};drop.ondragleave=()=>drop.classList.remove('over');drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');uploadFiles([...e.dataTransfer.files])};
+$('#logout').onclick=async()=>{await fetch('/ui/logout',{method:'POST',credentials:'same-origin'});location.replace('/')};
+fetch('/api/health').then(r=>r.json()).then(x=>{maxUpload=x.max_upload_bytes||maxUpload;$('#limit').textContent=size(maxUpload);$('#free').textContent=size(x.free_bytes||0)});list();
 </script></html>"""
 
 ALLOWED_NETS = [
@@ -63,9 +88,13 @@ _state = {
     "started": 0.0, "max_upload_bytes": DEFAULT_MAX_UPLOAD_BYTES,
     "min_free_bytes": MIN_FREE_BYTES, "logger": None, "sessions": {},
 }
-_mutation_lock = threading.Lock()
 _logger_lock = threading.Lock()
 _session_lock = threading.Lock()
+_path_locks_guard = threading.Lock()
+_path_locks = {}
+_tree_activity_lock = threading.Lock()
+_active_uploads = set()
+_moving_paths = set()
 
 
 def _pg_up():
@@ -114,6 +143,52 @@ def _log(event, **fields):
     if logger is not None:
         details = " ".join("{}={}".format(k, v) for k, v in fields.items())
         logger.info("%s%s", event, " " + details if details else "")
+
+
+@contextmanager
+def _path_lock(path):
+    key = os.path.abspath(path)
+    with _path_locks_guard:
+        entry = _path_locks.get(key)
+        if entry is None:
+            entry = [threading.Lock(), 0]
+            _path_locks[key] = entry
+        entry[1] += 1
+    entry[0].acquire()
+    try:
+        yield
+    finally:
+        entry[0].release()
+        with _path_locks_guard:
+            entry[1] -= 1
+            if entry[1] == 0:
+                _path_locks.pop(key, None)
+
+
+def _remove_tree(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        for name in os.listdir(path):
+            _remove_tree(os.path.join(path, name))
+        os.rmdir(path)
+    else:
+        os.unlink(path)
+
+
+def _path_size(path):
+    if os.path.isfile(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+    total = 0
+    for current, dirs, files in os.walk(path, followlinks=False):
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(current, d))]
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(current, name))
+            except OSError:
+                continue
+    return total
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -207,11 +282,128 @@ class Handler(BaseHTTPRequestHandler):
         """Ruta dentro de la raiz NAS o None (anti path-traversal, sigue symlinks)."""
         if "\x00" in rel:
             return None
+        if any(part == TRASH_DIRNAME for part in rel.replace("\\", "/").split("/")):
+            return None
         root = os.path.realpath(_state["root"])
         target = os.path.realpath(os.path.join(root, rel.lstrip("/")))
         if target == root or target.startswith(root + os.sep):
             return target
         return None
+
+    def _trash_root(self):
+        return os.path.join(os.path.realpath(_state["root"]), TRASH_DIRNAME)
+
+    def _purge_expired_trash(self):
+        root = self._trash_root()
+        if not os.path.isdir(root):
+            return
+        cutoff = time.time() - TRASH_RETENTION_SECONDS
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                try:
+                    with open(os.path.join(entry.path, "metadata.json"), encoding="utf-8") as f:
+                        meta = json.load(f)
+                    if float(meta["deleted_at"]) < cutoff:
+                        with _path_lock(entry.path):
+                            _remove_tree(entry.path)
+                        _log("trash_expired")
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+
+    def _trash_items(self):
+        self._purge_expired_trash()
+        root = self._trash_root()
+        items = []
+        if os.path.isdir(root):
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        with open(os.path.join(entry.path, "metadata.json"), encoding="utf-8") as f:
+                            meta = json.load(f)
+                        meta["id"] = entry.name
+                        items.append(meta)
+                    except (OSError, ValueError):
+                        continue
+        items.sort(key=lambda x: x.get("deleted_at", 0), reverse=True)
+        return items
+
+    def _move_to_trash(self, rel):
+        self._purge_expired_trash()
+        target = self._resolve(rel)
+        if not rel or target is None or target == os.path.realpath(_state["root"]):
+            return self._err(400, "invalid path", "invalid_path")
+        root = os.path.realpath(_state["root"])
+        original = os.path.relpath(target, root)
+        trash = self._trash_root()
+        with _path_lock(target):
+            if not os.path.lexists(target):
+                return self._err(404, "item not found", "not_found")
+            with _tree_activity_lock:
+                if any(p == target or p.startswith(target + os.sep) for p in _active_uploads):
+                    return self._err(409, "item has an active upload", "operation_in_progress")
+                _moving_paths.add(target)
+            entry_id = secrets.token_hex(16)
+            entry = os.path.join(trash, entry_id)
+            payload = os.path.join(entry, "payload")
+            try:
+                os.makedirs(entry)
+                meta = {
+                    "name": os.path.basename(target), "original_path": original,
+                    "deleted_at": time.time(), "is_dir": os.path.isdir(target),
+                    "size": _path_size(target),
+                }
+                os.replace(target, payload)
+                try:
+                    with open(os.path.join(entry, "metadata.json"), "w", encoding="utf-8") as f:
+                        json.dump(meta, f, ensure_ascii=False)
+                        f.flush()
+                        os.fsync(f.fileno())
+                except OSError:
+                    os.replace(payload, target)
+                    raise
+            except OSError as exc:
+                if os.path.isdir(entry) and not os.listdir(entry):
+                    os.rmdir(entry)
+                if exc.errno in (errno.EACCES, errno.EPERM):
+                    return self._err(403, "permission denied", "storage_permission_denied")
+                _log("trash_move_failed", errno=exc.errno)
+                return self._err(500, "could not move item to trash", "storage_error")
+            finally:
+                with _tree_activity_lock:
+                    _moving_paths.discard(target)
+        _log("trash_item_added")
+        self._send(200, {"id": entry_id, "original_path": original})
+
+    def _restore_from_trash(self, entry_id):
+        if not entry_id or any(c not in "0123456789abcdef" for c in entry_id):
+            return self._err(400, "invalid trash item id", "invalid_id")
+        entry = os.path.join(self._trash_root(), entry_id)
+        with _path_lock(entry):
+            try:
+                with open(os.path.join(entry, "metadata.json"), encoding="utf-8") as f:
+                    meta = json.load(f)
+                target = self._resolve(meta["original_path"])
+                payload = os.path.join(entry, "payload")
+                if target is None:
+                    return self._err(400, "invalid original path", "invalid_path")
+                if not os.path.isdir(os.path.dirname(target)):
+                    return self._err(404, "original parent directory no longer exists", "parent_not_found")
+                with _path_lock(target):
+                    if os.path.lexists(target):
+                        return self._err(409, "restore destination already exists", "file_exists")
+                    os.replace(payload, target)
+                _remove_tree(entry)
+            except FileNotFoundError:
+                return self._err(404, "trash item not found", "not_found")
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                _log("trash_restore_failed", error=type(exc).__name__)
+                return self._err(500, "could not restore item", "storage_error")
+        _log("trash_item_restored")
+        self._send(200, {"restored": meta["original_path"]})
 
     # ---- verbos ----
     def do_GET(self):
@@ -237,7 +429,21 @@ class Handler(BaseHTTPRequestHandler):
                 "nas_writable": bool(root) and os.access(root, os.W_OK),
                 "uptime_s": int(time.time() - _state["started"]),
                 "max_upload_bytes": _state["max_upload_bytes"],
+                "free_bytes": shutil.disk_usage(root).free if root and os.path.isdir(root) else 0,
             })
+        elif path == "/api/nas/trash":
+            if not self._gate(True):
+                return
+            try:
+                items = self._trash_items()
+                self._send(200, {
+                    "items": items,
+                    "retention_days": TRASH_RETENTION_SECONDS // 86400,
+                    "total_bytes": sum(item.get("size", 0) for item in items),
+                })
+            except OSError as exc:
+                _log("trash_list_failed", errno=exc.errno)
+                self._err(500, "could not list trash", "storage_error")
         elif path == "/api/nas/list":
             if not self._gate(True):
                 return
@@ -247,9 +453,23 @@ class Handler(BaseHTTPRequestHandler):
             if not os.path.isdir(target):
                 return self._err(404, "directory not found", "not_found")
             try:
+                limit = int(q.get("limit", LIST_DEFAULT_LIMIT))
+                offset = int(q.get("offset", "0"))
+            except ValueError:
+                return self._err(400, "invalid pagination values", "invalid_pagination")
+            if limit < 1 or limit > LIST_MAX_LIMIT or offset < 0:
+                return self._err(400, "pagination values out of range", "invalid_pagination")
+            sort_by = q.get("sort", "name")
+            direction = q.get("direction", "asc")
+            if sort_by not in ("name", "size", "mtime") or direction not in ("asc", "desc"):
+                return self._err(400, "invalid sort options", "invalid_sort")
+            search = q.get("search", "").casefold()
+            try:
                 items = []
                 with os.scandir(target) as it:
-                    for e in sorted(it, key=lambda x: x.name.lower()):
+                    for e in it:
+                        if e.name == TRASH_DIRNAME or (search and search not in e.name.casefold()):
+                            continue
                         try:
                             st = e.stat()
                         except OSError:
@@ -260,11 +480,22 @@ class Handler(BaseHTTPRequestHandler):
                             "size": 0 if e.is_dir() else st.st_size,
                             "mtime": int(st.st_mtime),
                         })
+                items.sort(
+                    key=lambda item: item[sort_by].casefold() if sort_by == "name" else item[sort_by],
+                    reverse=direction == "desc",
+                )
+                items.sort(key=lambda item: not item["is_dir"])
             except OSError as exc:
                 _log("list_failed", errno=exc.errno)
                 return self._err(500, "could not list directory", "storage_error")
             rel = os.path.relpath(target, os.path.realpath(_state["root"]))
-            self._send(200, {"path": "" if rel == "." else rel, "items": items})
+            total = len(items)
+            page_items = items[offset:offset + limit]
+            self._send(200, {
+                "path": "" if rel == "." else rel, "items": page_items,
+                "offset": offset, "limit": limit, "total": total,
+                "has_more": offset + limit < total,
+            })
         elif path == "/api/nas/download":
             if not self._gate(True):
                 return
@@ -336,8 +567,14 @@ class Handler(BaseHTTPRequestHandler):
 
         parent = os.path.dirname(target)
         tmp = None
-        with _mutation_lock:
+        active_upload = False
+        with _path_lock(target):
             try:
+                with _tree_activity_lock:
+                    if any(target == p or target.startswith(p + os.sep) for p in _moving_paths):
+                        return self._err(409, "parent item is being moved", "operation_in_progress")
+                    _active_uploads.add(target)
+                    active_upload = True
                 os.makedirs(parent, exist_ok=True)
                 if not os.path.isdir(parent):
                     return self._err(409, "parent path is not a directory", "invalid_path")
@@ -395,6 +632,9 @@ class Handler(BaseHTTPRequestHandler):
                         os.unlink(tmp)
                     except OSError:
                         pass
+                if active_upload:
+                    with _tree_activity_lock:
+                        _active_uploads.discard(target)
         self._send(201, {"path": rel, "size": length})
 
     do_PUT = _upload
@@ -411,6 +651,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True}, extra={
                 "Set-Cookie": "c67_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
             })
+        if path == "/api/nas/trash/restore":
+            if not self._gate(True):
+                return
+            return self._restore_from_trash(q.get("id", ""))
+        if path == "/api/nas/trash":
+            if not self._gate(True):
+                return
+            return self._move_to_trash(q.get("path", ""))
         if path != "/api/nas/mkdir":
             return self._upload()
         if not self._gate(True):
@@ -419,7 +667,7 @@ class Handler(BaseHTTPRequestHandler):
         target = self._resolve(rel)
         if not rel or target is None or target == os.path.realpath(_state["root"]):
             return self._err(400, "invalid path")
-        with _mutation_lock:
+        with _path_lock(target):
             try:
                 os.mkdir(target)
             except FileExistsError:
@@ -467,7 +715,7 @@ class Handler(BaseHTTPRequestHandler):
         target = self._resolve(q.get("path", ""))
         if target is None or target == os.path.realpath(_state["root"]):
             return self._err(400, "invalid path", "invalid_path")
-        with _mutation_lock:
+        with _path_lock(target):
             try:
                 if os.path.isdir(target):
                     os.rmdir(target)
@@ -484,6 +732,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(500, "could not delete item", "storage_error")
         _log("delete_completed")
         self._send(200, {"deleted": q.get("path", "")})
+
+    def do_PATCH(self):
+        path, _ = self._query()
+        if path != "/api/nas/trash":
+            return self._err(404, "unknown endpoint")
+        if not self._gate(True):
+            return
+        root = self._trash_root()
+        try:
+            if os.path.isdir(root):
+                with _path_lock(root):
+                    _remove_tree(root)
+            _log("trash_emptied")
+            self._send(200, {"emptied": True})
+        except OSError as exc:
+            _log("trash_empty_failed", errno=exc.errno)
+            self._err(500, "could not empty trash", "storage_error")
 
 
 class _Server(ThreadingHTTPServer):

@@ -9,6 +9,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from urllib.parse import quote
 from unittest.mock import patch
 
 import sys
@@ -99,6 +100,75 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request("DELETE", "/api/nas/delete?path=docs%2Fnote.txt")[0], 200)
         self.assertEqual(self.request("DELETE", "/api/nas/delete?path=docs")[0], 200)
 
+    def test_listing_pagination_search_and_sort(self):
+        for name, body in (("zeta.txt", b"123"), ("alpha.txt", b"1"), ("beta.txt", b"12")):
+            self.assertEqual(self.request("PUT", "/api/nas/upload?path=" + name, body)[0], 201)
+        status, _, first = self.json_request(
+            "GET", "/api/nas/list?limit=2&offset=0&sort=name&direction=asc"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([x["name"] for x in first["items"]], ["alpha.txt", "beta.txt"])
+        self.assertTrue(first["has_more"])
+        _, _, second = self.json_request(
+            "GET", "/api/nas/list?limit=2&offset=2&sort=name&direction=asc"
+        )
+        self.assertEqual([x["name"] for x in second["items"]], ["zeta.txt"])
+        _, _, matches = self.json_request("GET", "/api/nas/list?search=ETA&limit=10")
+        self.assertEqual([x["name"] for x in matches["items"]], ["beta.txt", "zeta.txt"])
+        _, _, largest = self.json_request("GET", "/api/nas/list?sort=size&direction=desc&limit=1")
+        self.assertEqual(largest["items"][0]["name"], "zeta.txt")
+        self.assertEqual(self.request("GET", "/api/nas/list?limit=501")[0], 400)
+        self.assertEqual(self.request("GET", "/api/nas/list?sort=invalid")[0], 400)
+
+    def test_trash_restore_conflict_and_empty(self):
+        self.request("POST", "/api/nas/mkdir?path=docs")
+        self.request("PUT", "/api/nas/upload?path=docs%2Fresume.txt", b"important")
+        status, _, moved = self.json_request("POST", "/api/nas/trash?path=docs%2Fresume.txt")
+        self.assertEqual(status, 200)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "docs", "resume.txt")))
+        status, _, trash = self.json_request("GET", "/api/nas/trash")
+        self.assertEqual(status, 200)
+        self.assertEqual(trash["items"][0]["original_path"], "docs/resume.txt")
+        self.request("PUT", "/api/nas/upload?path=docs%2Fresume.txt", b"new")
+        self.assertEqual(self.request("POST", "/api/nas/trash/restore?id=" + moved["id"])[0], 409)
+        self.request("PATCH", "/api/nas/trash")
+        self.assertEqual(self.request("GET", "/api/nas/trash")[0], 200)
+        self.assertEqual(self.json_request("GET", "/api/nas/trash")[2]["items"], [])
+        self.assertEqual(self.request("GET", "/api/nas/list")[0], 200)
+        _, _, root_listing = self.json_request("GET", "/api/nas/list")
+        self.assertNotIn(c67core.TRASH_DIRNAME, [x["name"] for x in root_listing["items"]])
+
+    def test_restore_happy_path_and_cannot_browse_internal_trash(self):
+        self.request("PUT", "/api/nas/upload?path=report.txt", b"recover me")
+        _, _, moved = self.json_request("POST", "/api/nas/trash?path=report.txt")
+        self.assertEqual(self.request("GET", "/api/nas/list?path=" + c67core.TRASH_DIRNAME)[0], 400)
+        self.assertEqual(self.request("POST", "/api/nas/trash/restore?id=" + moved["id"])[0], 200)
+        with open(os.path.join(self.root, "report.txt"), "rb") as restored:
+            self.assertEqual(restored.read(), b"recover me")
+
+    def test_trash_expires_entries_after_retention_period(self):
+        self.request("PUT", "/api/nas/upload?path=old.txt", b"old")
+        _, _, moved = self.json_request("POST", "/api/nas/trash?path=old.txt")
+        metadata = os.path.join(self.root, c67core.TRASH_DIRNAME, moved["id"], "metadata.json")
+        with open(metadata, encoding="utf-8") as meta_file:
+            meta = json.load(meta_file)
+        meta["deleted_at"] = time.time() - c67core.TRASH_RETENTION_SECONDS - 1
+        with open(metadata, "w", encoding="utf-8") as meta_file:
+            json.dump(meta, meta_file)
+        self.assertEqual(self.json_request("GET", "/api/nas/trash")[2]["items"], [])
+        self.assertFalse(os.path.exists(os.path.join(self.root, c67core.TRASH_DIRNAME, moved["id"])))
+
+    def test_download_stream_response_supports_unicode_names(self):
+        name = "café résumé.txt"
+        self.request("PUT", "/api/nas/upload?path=" + quote(name), b"stream")
+        status, headers, body = self.request(
+            "GET", "/api/nas/download?path=" + quote(name)
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(dict(headers)["Content-Length"], "6")
+        self.assertIn("filename*=UTF-8''caf%C3%A9%20r%C3%A9sum%C3%A9.txt", dict(headers)["Content-Disposition"])
+        self.assertEqual(body, b"stream")
+
     def test_interrupted_upload_removes_temporary_file(self):
         protected_path = os.path.join(self.root, "protected.txt")
         with open(protected_path, "wb") as protected:
@@ -134,6 +204,9 @@ class ApiTests(unittest.TestCase):
             sock.close()
         self.assertIn(b"408", response)
         self.assertFalse(os.path.exists(os.path.join(self.root, "idle")))
+        deadline = time.time() + 2
+        while time.time() < deadline and any(n.startswith(".c67-upload-") for n in os.listdir(self.root)):
+            time.sleep(0.01)
         self.assertFalse(any(n.startswith(".c67-upload-") for n in os.listdir(self.root)))
 
     def test_no_overwrite_is_atomic_for_concurrent_requests(self):
@@ -145,6 +218,41 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(sorted(statuses), [201, 409])
         with open(os.path.join(self.root, "shared.txt"), "rb") as uploaded:
             self.assertEqual(uploaded.read(), b"replacement")
+
+    def test_uploads_to_different_paths_are_not_serialized(self):
+        slow = socket.create_connection(("127.0.0.1", self.port), timeout=3)
+        slow.sendall(
+            b"PUT /api/nas/upload?path=slow.bin HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+            + c67core._state["token"].encode()
+            + b"\r\nContent-Length: 100\r\n\r\npartial"
+        )
+        deadline = time.time() + 2
+        while time.time() < deadline and not any(n.startswith(".c67-upload-") for n in os.listdir(self.root)):
+            time.sleep(0.01)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(self.request, "PUT", "/api/nas/upload?path=fast.bin", b"quick")
+            self.assertEqual(result.result(timeout=2)[0], 201)
+        slow.close()
+        time.sleep(0.05)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "slow.bin")))
+
+    def test_trash_refuses_directory_with_active_upload(self):
+        os.mkdir(os.path.join(self.root, "busy"))
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=3)
+        sock.sendall(
+            b"PUT /api/nas/upload?path=busy%2Fslow.bin HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+            + c67core._state["token"].encode()
+            + b"\r\nContent-Length: 16\r\n\r\npartial"
+        )
+        deadline = time.time() + 2
+        while time.time() < deadline and not any(n.startswith(".c67-upload-") for n in os.listdir(os.path.join(self.root, "busy"))):
+            time.sleep(0.01)
+        self.assertTrue(any(p.startswith(os.path.join(self.root, "busy") + os.sep)
+                            for p in c67core._active_uploads))
+        self.assertEqual(self.request("POST", "/api/nas/trash?path=busy")[0], 409)
+        sock.close()
+        time.sleep(0.05)
+        self.assertTrue(os.path.isdir(os.path.join(self.root, "busy")))
 
     def test_login_protects_web_app_and_reuses_cookie_for_api(self):
         status, _, body = self.request("GET", "/")
