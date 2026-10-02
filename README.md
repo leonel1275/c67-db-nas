@@ -45,7 +45,8 @@ se pueden copiar desde la pantalla PostgreSQL. La carpeta compartida sigue siend
 Desde una PC conectada a la misma LAN privada o a Tailscale, abre `http://<IP-del-telefono>:8000/`
 e inicia sesión con el token NAS mostrado por la app. La interfaz permite navegar, crear carpetas,
 subir, descargar y eliminar archivos; el servidor sigue aplicando su lista de redes permitidas.
-El token no se añade a URLs. La conexión es HTTP sin cifrado: úsala solo en una red confiable,
+El token no se añade a URLs: tras iniciar sesión, el navegador recibe una cookie de sesión `HttpOnly`
+con vencimiento de siete días. La conexión es HTTP sin cifrado: úsala solo en una red confiable,
 preferiblemente Tailscale, y no la publiques directamente en Internet.
 
 Las subidas aceptan hasta **1 GiB** por defecto y reservan **64 MiB** de espacio libre antes de

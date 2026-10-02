@@ -24,7 +24,7 @@ class ApiTests(unittest.TestCase):
         c67core._configure_logging(self.temp.name)
         c67core._state.update(
             root=self.root, files_dir=self.temp.name, token="test-token-not-for-logs",
-            started=time.time(), max_upload_bytes=16, min_free_bytes=0,
+            started=time.time(), max_upload_bytes=16, min_free_bytes=0, sessions={},
         )
         self.server = c67core.ThreadingHTTPServer(("127.0.0.1", 0), c67core.Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -157,11 +157,13 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         cookie = dict(headers)["Set-Cookie"].split(";", 1)[0]
+        self.assertNotEqual(cookie.split("=", 1)[1], "test-token-not-for-logs")
         status, _, body = self.request("GET", "/", token=False, cookie=cookie)
         self.assertEqual(status, 200)
         self.assertIn(b"let path=", body)
         self.assertEqual(self.request("GET", "/api/nas/list", token=False, cookie=cookie)[0], 200)
         self.assertEqual(self.request("POST", "/ui/logout", token=False, cookie=cookie)[0], 200)
+        self.assertEqual(self.request("GET", "/api/nas/list", token=False, cookie=cookie)[0], 401)
 
     def test_rotating_logs_never_include_token_or_file_content(self):
         old_max = c67core.LOG_MAX_BYTES

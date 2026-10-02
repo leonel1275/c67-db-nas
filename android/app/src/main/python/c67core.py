@@ -20,6 +20,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import shutil
+import secrets
 import socket
 import tempfile
 import threading
@@ -32,6 +33,8 @@ CHUNK = 1 << 20
 DEFAULT_MAX_UPLOAD_BYTES = 1 << 30
 MIN_FREE_BYTES = 64 << 20
 UPLOAD_IDLE_TIMEOUT_SECONDS = 60
+UI_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+UI_SESSION_LIMIT = 64
 LOG_MAX_BYTES = 512 << 10
 LOG_BACKUP_COUNT = 3
 _WEB_LOGIN = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>C67 NAS</title><style>body{font:16px system-ui;max-width:32rem;margin:12vh auto;padding:1rem;background:#f3f5f8;color:#17202a}main{background:white;padding:2rem;border-radius:1rem;box-shadow:0 4px 24px #0001}input,button{font:inherit;padding:.7rem;width:100%;box-sizing:border-box;margin:.4rem 0}button{cursor:pointer}#err{color:#a00}</style><main><h1>C67 NAS</h1><p>Ingresa el token NAS que muestra la aplicación Android.</p><form id="login"><input id="token" type="password" autocomplete="current-password" required placeholder="Token NAS"><button>Entrar</button></form><p id="err" role="alert"></p></main><script>document.querySelector('#login').onsubmit=async e=>{e.preventDefault();let r=await fetch('/ui/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.querySelector('#token').value})});if(r.ok)location.replace('/');else document.querySelector('#err').textContent='Token no válido o acceso no permitido.'}</script></html>"""
@@ -58,10 +61,11 @@ ALLOWED_NETS = [
 _state = {
     "root": None, "files_dir": None, "token": "", "server": None, "port": 0,
     "started": 0.0, "max_upload_bytes": DEFAULT_MAX_UPLOAD_BYTES,
-    "min_free_bytes": MIN_FREE_BYTES, "logger": None,
+    "min_free_bytes": MIN_FREE_BYTES, "logger": None, "sessions": {},
 }
 _mutation_lock = threading.Lock()
 _logger_lock = threading.Lock()
+_session_lock = threading.Lock()
 
 
 def _pg_up():
@@ -153,6 +157,29 @@ class Handler(BaseHTTPRequestHandler):
                 return value
         return ""
 
+    def _session_authenticated(self, session_id):
+        if not session_id:
+            return False
+        now = time.time()
+        with _session_lock:
+            expired = [key for key, expiry in _state["sessions"].items() if expiry <= now]
+            for key in expired:
+                _state["sessions"].pop(key, None)
+            return _state["sessions"].get(session_id, 0) > now
+
+    def _new_session(self):
+        now = time.time()
+        session_id = secrets.token_urlsafe(32)
+        with _session_lock:
+            expired = [key for key, expiry in _state["sessions"].items() if expiry <= now]
+            for key in expired:
+                _state["sessions"].pop(key, None)
+            if len(_state["sessions"]) >= UI_SESSION_LIMIT:
+                oldest = min(_state["sessions"], key=_state["sessions"].get)
+                _state["sessions"].pop(oldest, None)
+            _state["sessions"][session_id] = now + UI_SESSION_TTL_SECONDS
+        return session_id
+
     def _gate(self, need_token):
         if not _client_allowed(self.client_address[0]):
             self._err(403, "client not allowed")
@@ -162,8 +189,11 @@ class Handler(BaseHTTPRequestHandler):
             auth = self.headers.get("Authorization", "")
             if auth.lower().startswith("bearer "):
                 got = auth[7:].strip()
-            got = got or self.headers.get("X-Token", "") or self._cookie_token()
-            if not _state["token"] or not hmac.compare_digest(got.encode(), _state["token"].encode()):
+            got = got or self.headers.get("X-Token", "")
+            token_valid = bool(_state["token"]) and hmac.compare_digest(
+                got.encode(), _state["token"].encode()
+            )
+            if not token_valid and not self._session_authenticated(self._cookie_token()):
                 self._err(401, "invalid token")
                 return False
         return True
@@ -189,10 +219,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             if not self._gate(False):
                 return
-            cookie = self._cookie_token()
-            authenticated = bool(_state["token"]) and hmac.compare_digest(
-                cookie.encode(), _state["token"].encode()
-            )
+            authenticated = self._session_authenticated(self._cookie_token())
             page = _WEB_APP if authenticated else _WEB_LOGIN
             self._send(200, raw=page.encode("utf-8"), ctype="text/html; charset=utf-8", extra={
                 "X-Content-Type-Options": "nosniff",
@@ -379,6 +406,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/ui/logout":
             if not self._gate(True):
                 return
+            with _session_lock:
+                _state["sessions"].pop(self._cookie_token(), None)
             return self._send(200, {"ok": True}, extra={
                 "Set-Cookie": "c67_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
             })
@@ -421,9 +450,12 @@ class Handler(BaseHTTPRequestHandler):
         ):
             _log("ui_login_failed")
             return self._err(401, "invalid token", "unauthorized")
+        session_id = self._new_session()
         _log("ui_login_completed")
         self._send(200, {"ok": True}, extra={
-            "Set-Cookie": "c67_session={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800".format(token),
+            "Set-Cookie": "c67_session={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}".format(
+                session_id, UI_SESSION_TTL_SECONDS
+            ),
         })
 
     def do_DELETE(self):
