@@ -6,7 +6,7 @@ sin `com.g4pg`, sin Termux, sin root. Standalone: no necesita los submódulos de
 ## Qué hace
 - PostgreSQL 18 (binarios aarch64 de Termux) en `0.0.0.0:5432`, solo TCP, `scram-sha-256`,
   accesible desde loopback, Tailscale (100.64.0.0/10) y LAN privada.
-- API NAS (Python stdlib) en `:8000`: `/api/health`, `/api/nas/{list,download,upload,delete}` sobre
+- API NAS (Python stdlib) en `:8000`: interfaz web `/` y `/api/health`, `/api/nas/{list,download,upload,mkdir,delete}` sobre
   `/storage/emulated/0/NAS`, con token y lista de redes permitidas.
 - Servicio en primer plano (`specialUse`) + WakeLock + `START_STICKY` + arranque en boot.
 - WAL archiving a `/storage/emulated/0/NAS/pg_wal` (solo si la carpeta es escribible).
@@ -33,8 +33,49 @@ scripts/verify-g0-g3.sh 100.x.y.z   # G0 exec, G1 initdb, G2 puertos, G3 API
 ```
 
 ## Uso
-Al abrir la app ves IPs, password de Postgres (`postgres`) y token NAS. Tocá los botones 1 y 2
-(acceso a archivos y exención de batería) y luego *Detener todo* + abrir otra vez.
+La app Android incluye pantallas de estado del servicio, explorador NAS (listar, crear carpetas,
+subir, descargar y borrar archivos), datos de conexión PostgreSQL y ajustes de permisos/servicio.
+Usa componentes nativos y el selector de archivos de Android; conserva el mínimo Android 8 y el
+soporte arm64. Para administrar desde otro dispositivo sigue disponible la API HTTP.
+
+La contraseña inicial de Postgres y el token NAS se generan en el teléfono; los datos de conexión
+se pueden copiar desde la pantalla PostgreSQL. La carpeta compartida sigue siendo
+`/storage/emulated/0/NAS` cuando se otorga acceso a todos los archivos.
+
+Desde una PC conectada a la misma LAN privada o a Tailscale, abre `http://<IP-del-telefono>:8000/`
+e inicia sesión con el token NAS mostrado por la app. La interfaz permite navegar, crear carpetas,
+subir, descargar y mover elementos a la papelera; el servidor sigue aplicando su lista de redes permitidas.
+El token no se añade a URLs: tras iniciar sesión, el navegador recibe una cookie de sesión `HttpOnly`
+con vencimiento de siete días. La conexión es HTTP sin cifrado: úsala solo en una red confiable,
+preferiblemente Tailscale, y no la publiques directamente en Internet.
+
+Las subidas aceptan hasta **1 GiB** por defecto y reservan **64 MiB** de espacio libre antes de
+empezar. Se pueden ajustar con `C67_MAX_UPLOAD_BYTES` y `C67_MIN_FREE_BYTES`. Los errores de API
+usan JSON `{ "error": { "code": "...", "message": "..." } }`; entre los códigos HTTP están 400
+(solicitud inválida), 401/403 (autenticación/red), 404 (no existe), 409 (conflicto), 411 (falta
+Content-Length), 413 (límite excedido) y 507 (espacio insuficiente). Los temporales se borran si una
+subida falla. Las subidas al mismo destino se coordinan: con `overwrite=0` solo una subida concurrente
+puede crearlo; sin esa opción, las reemplazan en el orden de adquisición del bloqueo por destino.
+Una subida sin datos durante 60 segundos expira y limpia su temporal.
+Los eventos y fallos se guardan en `files/nas-api.log`, con rotación de 512 KiB y tres copias, sin
+registrar tokens ni contenido.
+
+### Transferencias y papelera web
+- Las subidas muestran progreso por archivo, admiten cancelar y reintentar; arrastrar y soltar también
+  inicia cargas. La cancelación elimina el temporal y conserva el destino anterior. Archivos con el
+  mismo nombre generan conflicto; la web permite cancelar, reemplazar o proponer otro nombre.
+- Descargas usan la navegación HTTP del navegador y no crean una copia `Blob` completa en memoria.
+- Los listados aceptan `limit` (1–500; predeterminado 100), `offset`, `search`, `sort=name|size|mtime`
+  y `direction=asc|desc`. La web permite cargar más resultados, filtrar la carpeta actual y ordenar.
+- El botón **Papelera** retiene los elementos movidos durante 30 días; al abrirla se eliminan entradas
+  vencidas. Se puede restaurar mientras el destino original exista y esté libre, o vaciar la papelera
+  manualmente. Un destino ocupado da conflicto en vez de sobrescribirse.
+- Las subidas concurrentes a rutas distintas progresan en paralelo. Las operaciones sobre el mismo
+  destino se coordinan; con `overwrite=0` la primera carga completada lo crea y las demás reciben 409.
+- El servidor selecciona solo la página solicitada y los elementos anteriores necesarios para
+  respetar el orden global, en vez de guardar y ordenar toda la carpeta en memoria. Aún recorre las
+  entradas para calcular el total exacto y filtrar; un índice persistente sería necesario para evitar
+  también ese recorrido. La búsqueda solo aplica a la carpeta actual, no es recursiva.
 ```
 psql -h 100.x.y.z -U postgres        # o DBeaver
 curl -H "Authorization: Bearer TOKEN" http://100.x.y.z:8000/api/nas/list
@@ -49,4 +90,3 @@ Cambiar password: `ALTER USER postgres PASSWORD '...';` (la app solo muestra la 
 - **G2 (Puertos):** PostgreSQL escuchando en `0.0.0.0:5432` con `scram-sha-256`. Comprobada conexión TCP remota.
 - **G3 (NAS API):** HTTP API escuchando en `0.0.0.0:8000`. Verificados endpoints `/api/health`, `/api/nas/list`, `upload` y `download`.
 - **G4 (Persistencia):** Foreground service persistente con WakeLock y recuperación tras reinicio.
-
