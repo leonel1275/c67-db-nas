@@ -6,7 +6,7 @@ sin `com.g4pg`, sin Termux, sin root. Standalone: no necesita los submódulos de
 ## Qué hace
 - PostgreSQL 18 (binarios aarch64 de Termux) en `0.0.0.0:5432`, solo TCP, `scram-sha-256`,
   accesible desde loopback, Tailscale (100.64.0.0/10) y LAN privada.
-- API NAS (Python stdlib) en `:8000`: `/api/health`, `/api/nas/{list,download,upload,delete}` sobre
+- API NAS (Python stdlib) en `:8000`: interfaz web `/` y `/api/health`, `/api/nas/{list,download,upload,delete}` sobre
   `/storage/emulated/0/NAS`, con token y lista de redes permitidas.
 - Servicio en primer plano (`specialUse`) + WakeLock + `START_STICKY` + arranque en boot.
 - WAL archiving a `/storage/emulated/0/NAS/pg_wal` (solo si la carpeta es escribible).
@@ -41,6 +41,22 @@ soporte arm64. Para administrar desde otro dispositivo sigue disponible la API H
 La contraseña inicial de Postgres y el token NAS se generan en el teléfono; los datos de conexión
 se pueden copiar desde la pantalla PostgreSQL. La carpeta compartida sigue siendo
 `/storage/emulated/0/NAS` cuando se otorga acceso a todos los archivos.
+
+Desde una PC conectada a la misma LAN privada o a Tailscale, abre `http://<IP-del-telefono>:8000/`
+e inicia sesión con el token NAS mostrado por la app. La interfaz permite navegar, crear carpetas,
+subir, descargar y eliminar archivos; el servidor sigue aplicando su lista de redes permitidas.
+El token no se añade a URLs. La conexión es HTTP sin cifrado: úsala solo en una red confiable,
+preferiblemente Tailscale, y no la publiques directamente en Internet.
+
+Las subidas aceptan hasta **1 GiB** por defecto y reservan **64 MiB** de espacio libre antes de
+empezar. Se pueden ajustar con `C67_MAX_UPLOAD_BYTES` y `C67_MIN_FREE_BYTES`. Los errores de API
+usan JSON `{ "error": { "code": "...", "message": "..." } }`; entre los códigos HTTP están 400
+(solicitud inválida), 401/403 (autenticación/red), 404 (no existe), 409 (conflicto), 411 (falta
+Content-Length), 413 (límite excedido) y 507 (espacio insuficiente). Los temporales se borran si una
+subida falla. Las escrituras se serializan: con `overwrite=0` solo una subida concurrente al mismo
+nombre puede crearlo; sin esa opción, la última subida completada reemplaza el archivo.
+Los eventos y fallos se guardan en `files/nas-api.log`, con rotación de 512 KiB y tres copias, sin
+registrar tokens ni contenido.
 ```
 psql -h 100.x.y.z -U postgres        # o DBeaver
 curl -H "Authorization: Bearer TOKEN" http://100.x.y.z:8000/api/nas/list

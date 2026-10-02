@@ -25,6 +25,7 @@ jobs:
       - name: Tests (shmem + fetch)
         run: |
           chmod +x tests/test_shmem.sh tests/test_fetch.sh scripts/build-c67.sh scripts/build-shmem-fix.sh scripts/verify-g0-g3.sh
+          python3 tests/test_api.py
           bash tests/test_shmem.sh
           bash tests/test_fetch.sh
       - name: Build APK
