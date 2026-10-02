@@ -8,6 +8,8 @@ sin `com.g4pg`, sin Termux, sin root. Standalone: no necesita los submódulos de
   accesible desde loopback, Tailscale (100.64.0.0/10) y LAN privada.
 - API NAS (Python stdlib) en `:8000`: `/api/health`, `/api/nas/{list,download,upload,delete}` sobre
   `/storage/emulated/0/NAS`, con token y lista de redes permitidas.
+- Dashboard web local en `:8000/` y metricas de salud en `/api/metrics`.
+- Recheck manual autenticado de salud en `/api/checks/run`.
 - Servicio en primer plano (`specialUse`) + WakeLock + `START_STICKY` + arranque en boot.
 - WAL archiving a `/storage/emulated/0/NAS/pg_wal` (solo si la carpeta es escribible).
 
