@@ -13,6 +13,7 @@ Solo acepta clientes de loopback, Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48)
 y redes privadas (10/8, 172.16/12, 192.168/16).
 """
 import hmac
+import heapq
 import ipaddress
 import json
 import errno
@@ -465,32 +466,55 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(400, "invalid sort options", "invalid_sort")
             search = q.get("search", "").casefold()
             try:
-                items = []
-                with os.scandir(target) as it:
-                    for e in it:
-                        if e.name == TRASH_DIRNAME or (search and search not in e.name.casefold()):
-                            continue
+                total = 0
+
+                def matching_items():
+                    nonlocal total
+                    with os.scandir(target) as entries:
+                        for entry in entries:
+                            if entry.name == TRASH_DIRNAME or (
+                                search and search not in entry.name.casefold()
+                            ):
+                                continue
+                            try:
+                                is_dir = entry.is_dir()
+                                item = {"name": entry.name, "is_dir": is_dir}
+                                if sort_by != "name":
+                                    st = entry.stat()
+                                    item.update({
+                                        "size": 0 if is_dir else st.st_size,
+                                        "mtime": int(st.st_mtime),
+                                    })
+                                total += 1
+                                yield item
+                            except OSError:
+                                continue
+
+                def sort_key(item):
+                    value = item["name"].casefold() if sort_by == "name" else item[sort_by]
+                    if direction == "desc":
+                        return item["is_dir"], value, item["name"].casefold(), item["name"]
+                    return not item["is_dir"], value, item["name"].casefold(), item["name"]
+
+                end = offset + limit
+                select = heapq.nlargest if direction == "desc" else heapq.nsmallest
+                candidates = select(end + 1, matching_items(), key=sort_key)
+                page_items = candidates[offset:end]
+                if sort_by == "name":
+                    for item in page_items:
                         try:
-                            st = e.stat()
+                            st = os.stat(os.path.join(target, item["name"]))
+                            item.update({
+                                "size": 0 if item["is_dir"] else st.st_size,
+                                "mtime": int(st.st_mtime),
+                            })
                         except OSError:
-                            continue
-                        items.append({
-                            "name": e.name,
-                            "is_dir": e.is_dir(),
-                            "size": 0 if e.is_dir() else st.st_size,
-                            "mtime": int(st.st_mtime),
-                        })
-                items.sort(
-                    key=lambda item: item[sort_by].casefold() if sort_by == "name" else item[sort_by],
-                    reverse=direction == "desc",
-                )
-                items.sort(key=lambda item: not item["is_dir"])
+                            item["size"] = 0
+                            item["mtime"] = 0
             except OSError as exc:
                 _log("list_failed", errno=exc.errno)
                 return self._err(500, "could not list directory", "storage_error")
             rel = os.path.relpath(target, os.path.realpath(_state["root"]))
-            total = len(items)
-            page_items = items[offset:offset + limit]
             self._send(200, {
                 "path": "" if rel == "." else rel, "items": page_items,
                 "offset": offset, "limit": limit, "total": total,

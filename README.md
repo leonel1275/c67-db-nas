@@ -72,8 +72,10 @@ registrar tokens ni contenido.
   manualmente. Un destino ocupado da conflicto en vez de sobrescribirse.
 - Las subidas concurrentes a rutas distintas progresan en paralelo. Las operaciones sobre el mismo
   destino se coordinan; con `overwrite=0` la primera carga completada lo crea y las demás reciben 409.
-- El paginado limita los datos devueltos por respuesta, aunque para ordenar globalmente el servidor
-  recorre el directorio completo. La búsqueda solo aplica a la carpeta actual, no es recursiva.
+- El servidor selecciona solo la página solicitada y los elementos anteriores necesarios para
+  respetar el orden global, en vez de guardar y ordenar toda la carpeta en memoria. Aún recorre las
+  entradas para calcular el total exacto y filtrar; un índice persistente sería necesario para evitar
+  también ese recorrido. La búsqueda solo aplica a la carpeta actual, no es recursiva.
 ```
 psql -h 100.x.y.z -U postgres        # o DBeaver
 curl -H "Authorization: Bearer TOKEN" http://100.x.y.z:8000/api/nas/list

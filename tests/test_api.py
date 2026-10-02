@@ -108,6 +108,7 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual([x["name"] for x in first["items"]], ["alpha.txt", "beta.txt"])
+        self.assertEqual(first["total"], 3)
         self.assertTrue(first["has_more"])
         _, _, second = self.json_request(
             "GET", "/api/nas/list?limit=2&offset=2&sort=name&direction=asc"
@@ -117,6 +118,13 @@ class ApiTests(unittest.TestCase):
         self.assertEqual([x["name"] for x in matches["items"]], ["beta.txt", "zeta.txt"])
         _, _, largest = self.json_request("GET", "/api/nas/list?sort=size&direction=desc&limit=1")
         self.assertEqual(largest["items"][0]["name"], "zeta.txt")
+        _, _, descending = self.json_request(
+            "GET", "/api/nas/list?sort=name&direction=desc&limit=3"
+        )
+        self.assertEqual(
+            [x["name"] for x in descending["items"]],
+            ["zeta.txt", "beta.txt", "alpha.txt"],
+        )
         self.assertEqual(self.request("GET", "/api/nas/list?limit=501")[0], 400)
         self.assertEqual(self.request("GET", "/api/nas/list?sort=invalid")[0], 400)
 
