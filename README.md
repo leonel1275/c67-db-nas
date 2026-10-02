@@ -6,7 +6,7 @@ sin `com.g4pg`, sin Termux, sin root. Standalone: no necesita los submódulos de
 ## Qué hace
 - PostgreSQL 18 (binarios aarch64 de Termux) en `0.0.0.0:5432`, solo TCP, `scram-sha-256`,
   accesible desde loopback, Tailscale (100.64.0.0/10) y LAN privada.
-- API NAS (Python stdlib) en `:8000`: interfaz web `/` y `/api/health`, `/api/nas/{list,download,upload,delete}` sobre
+- API NAS (Python stdlib) en `:8000`: interfaz web `/` y `/api/health`, `/api/nas/{list,download,upload,mkdir,delete}` sobre
   `/storage/emulated/0/NAS`, con token y lista de redes permitidas.
 - Servicio en primer plano (`specialUse`) + WakeLock + `START_STICKY` + arranque en boot.
 - WAL archiving a `/storage/emulated/0/NAS/pg_wal` (solo si la carpeta es escribible).
@@ -55,6 +55,7 @@ usan JSON `{ "error": { "code": "...", "message": "..." } }`; entre los códigos
 Content-Length), 413 (límite excedido) y 507 (espacio insuficiente). Los temporales se borran si una
 subida falla. Las escrituras se serializan: con `overwrite=0` solo una subida concurrente al mismo
 nombre puede crearlo; sin esa opción, la última subida completada reemplaza el archivo.
+Una subida sin datos durante 60 segundos expira y limpia su temporal.
 Los eventos y fallos se guardan en `files/nas-api.log`, con rotación de 512 KiB y tres copias, sin
 registrar tokens ni contenido.
 ```

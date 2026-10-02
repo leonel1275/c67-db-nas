@@ -15,8 +15,8 @@ y redes privadas (10/8, 172.16/12, 192.168/16).
 import hmac
 import ipaddress
 import json
-import logging
 import errno
+import logging
 from logging.handlers import RotatingFileHandler
 import os
 import shutil
@@ -31,10 +31,11 @@ PG_PORT = 5432
 CHUNK = 1 << 20
 DEFAULT_MAX_UPLOAD_BYTES = 1 << 30
 MIN_FREE_BYTES = 64 << 20
+UPLOAD_IDLE_TIMEOUT_SECONDS = 60
 LOG_MAX_BYTES = 512 << 10
 LOG_BACKUP_COUNT = 3
-_WEB_LOGIN = b"""<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>C67 NAS</title><style>body{font:16px system-ui;max-width:32rem;margin:12vh auto;padding:1rem;background:#f3f5f8;color:#17202a}main{background:white;padding:2rem;border-radius:1rem;box-shadow:0 4px 24px #0001}input,button{font:inherit;padding:.7rem;width:100%;box-sizing:border-box;margin:.4rem 0}button{cursor:pointer}#err{color:#a00}</style><main><h1>C67 NAS</h1><p>Ingresa el token NAS que muestra la aplicación Android.</p><form id="login"><input id="token" type="password" autocomplete="current-password" required placeholder="Token NAS"><button>Entrar</button></form><p id="err" role="alert"></p></main><script>document.querySelector('#login').onsubmit=async e=>{e.preventDefault();let r=await fetch('/ui/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.querySelector('#token').value})});if(r.ok)location.replace('/');else document.querySelector('#err').textContent='Token no válido o acceso no permitido.'}</script></html>"""
-_WEB_APP = b"""<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>C67 NAS</title><style>body{font:16px system-ui;max-width:64rem;margin:auto;padding:1rem;background:#f3f5f8;color:#17202a}header,.toolbar,.item{display:flex;gap:.6rem;align-items:center;justify-content:space-between;flex-wrap:wrap}button{cursor:pointer;padding:.55rem .8rem}main{background:white;padding:1rem;border-radius:1rem}#items{list-style:none;padding:0}.item{border-bottom:1px solid #ddd;padding:.6rem 0}.name{overflow-wrap:anywhere;flex:1}#msg{white-space:pre-wrap;color:#8a2d00}.item button{margin-left:.25rem}</style><header><h1>C67 NAS</h1><button id="logout">Cerrar sesión</button></header><main><p id="where"></p><div class="toolbar"><button id="up">↑ Subir</button><button id="mkdir">Nueva carpeta</button><button id="refresh">Actualizar</button><input id="files" type="file" multiple hidden></div><p id="msg" role="status"></p><ul id="items"></ul></main><script>
+_WEB_LOGIN = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>C67 NAS</title><style>body{font:16px system-ui;max-width:32rem;margin:12vh auto;padding:1rem;background:#f3f5f8;color:#17202a}main{background:white;padding:2rem;border-radius:1rem;box-shadow:0 4px 24px #0001}input,button{font:inherit;padding:.7rem;width:100%;box-sizing:border-box;margin:.4rem 0}button{cursor:pointer}#err{color:#a00}</style><main><h1>C67 NAS</h1><p>Ingresa el token NAS que muestra la aplicación Android.</p><form id="login"><input id="token" type="password" autocomplete="current-password" required placeholder="Token NAS"><button>Entrar</button></form><p id="err" role="alert"></p></main><script>document.querySelector('#login').onsubmit=async e=>{e.preventDefault();let r=await fetch('/ui/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.querySelector('#token').value})});if(r.ok)location.replace('/');else document.querySelector('#err').textContent='Token no válido o acceso no permitido.'}</script></html>"""
+_WEB_APP = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>C67 NAS</title><style>body{font:16px system-ui;max-width:64rem;margin:auto;padding:1rem;background:#f3f5f8;color:#17202a}header,.toolbar,.item{display:flex;gap:.6rem;align-items:center;justify-content:space-between;flex-wrap:wrap}button{cursor:pointer;padding:.55rem .8rem}main{background:white;padding:1rem;border-radius:1rem}#items{list-style:none;padding:0}.item{border-bottom:1px solid #ddd;padding:.6rem 0}.name{overflow-wrap:anywhere;flex:1}#msg{white-space:pre-wrap;color:#8a2d00}.item button{margin-left:.25rem}</style><header><h1>C67 NAS</h1><button id="logout">Cerrar sesión</button></header><main><p id="where"></p><div class="toolbar"><button id="up">↑ Subir</button><button id="mkdir">Nueva carpeta</button><button id="refresh">Actualizar</button><input id="files" type="file" multiple hidden></div><p id="msg" role="status"></p><ul id="items"></ul></main><script>
 let path='',maxUpload=1073741824;const $=s=>document.querySelector(s), enc=s=>encodeURIComponent(s), msg=s=>$('#msg').textContent=s;
 async function api(method,url,body){let r=await fetch('/api/nas/'+url,{method,body});let data;if(r.status===204)data={};else{try{data=await r.json()}catch(_){data={}}}if(!r.ok)throw Error(data.error?.message||data.error||('HTTP '+r.status));return data}
 async function list(){msg('Cargando…');$('#where').textContent='/'+path;try{let d=await api('GET','list?path='+enc(path));$('#items').replaceChildren();for(let x of d.items){let li=document.createElement('li');li.className='item';let n=document.createElement('span');n.className='name';n.textContent=(x.is_dir?'📁 ':'📄 ')+x.name+(x.is_dir?'':' · '+x.size+' bytes');if(x.is_dir)n.onclick=()=>{path=path?path+'/'+x.name:x.name;list()};li.append(n);if(!x.is_dir){let b=document.createElement('button');b.textContent='Descargar';b.onclick=()=>download(x.name);li.append(b)}let del=document.createElement('button');del.textContent='Borrar';del.onclick=()=>remove(x.name,x.is_dir);li.append(del);$('#items').append(li)}if(path){let li=document.createElement('li'),b=document.createElement('button');b.textContent='← Carpeta superior';b.onclick=()=>{path=path.includes('/')?path.slice(0,path.lastIndexOf('/')):'';list()};li.append(b);$('#items').prepend(li)}msg(d.items.length?'':'Carpeta vacía')}catch(e){msg(e.message)}}
@@ -82,7 +83,6 @@ def _client_allowed(addr):
 
 
 def _configure_logging(files_dir):
-    os.makedirs(files_dir, exist_ok=True)
     logger = logging.getLogger("c67.nas")
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -90,12 +90,16 @@ def _configure_logging(files_dir):
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
             handler.close()
-        handler = RotatingFileHandler(
-            os.path.join(files_dir, "nas-api.log"),
-            maxBytes=LOG_MAX_BYTES,
-            backupCount=LOG_BACKUP_COUNT,
-            encoding="utf-8",
-        )
+        try:
+            os.makedirs(files_dir, exist_ok=True)
+            handler = RotatingFileHandler(
+                os.path.join(files_dir, "nas-api.log"),
+                maxBytes=LOG_MAX_BYTES,
+                backupCount=LOG_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+        except OSError:
+            handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         logger.addHandler(handler)
     _state["logger"] = logger
@@ -136,7 +140,7 @@ class Handler(BaseHTTPRequestHandler):
         if error_code is None:
             error_code = {
                 400: "bad_request", 401: "unauthorized", 403: "forbidden",
-                404: "not_found", 409: "conflict", 411: "length_required",
+                404: "not_found", 408: "request_timeout", 409: "conflict", 411: "length_required",
                 413: "file_too_large", 500: "internal_error", 507: "insufficient_storage",
             }.get(code, "request_failed")
         _log("request_error", status=code, error=error_code)
@@ -190,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
                 cookie.encode(), _state["token"].encode()
             )
             page = _WEB_APP if authenticated else _WEB_LOGIN
-            self._send(200, raw=page, ctype="text/html; charset=utf-8", extra={
+            self._send(200, raw=page.encode("utf-8"), ctype="text/html; charset=utf-8", extra={
                 "X-Content-Type-Options": "nosniff",
                 "Referrer-Policy": "no-referrer",
                 "Content-Security-Policy": "default-src 'self' blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
@@ -242,26 +246,37 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(400, "invalid path", "invalid_path")
             if not os.path.isfile(target):
                 return self._err(404, "file not found", "not_found")
-            size = os.path.getsize(target)
-            _log("download_started", size=size)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(size))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header(
-                "Content-Disposition",
-                "attachment; filename*=UTF-8''" + quote(os.path.basename(target)),
-            )
-            self.end_headers()
             try:
-                with open(target, "rb") as f:
-                    shutil.copyfileobj(f, self.wfile, CHUNK)
+                download = open(target, "rb")
+                size = os.fstat(download.fileno()).st_size
+            except FileNotFoundError:
+                return self._err(404, "file not found", "not_found")
+            except OSError as exc:
+                _log("download_failed", errno=exc.errno)
+                if exc.errno in (errno.EACCES, errno.EPERM):
+                    return self._err(403, "permission denied", "storage_permission_denied")
+                return self._err(500, "could not read file", "storage_error")
+            _log("download_started", size=size)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header(
+                    "Content-Disposition",
+                    "attachment; filename*=UTF-8''" + quote(os.path.basename(target)),
+                )
+                self.end_headers()
+                with download:
+                    shutil.copyfileobj(download, self.wfile, CHUNK)
                 _log("download_completed", size=size)
             except (BrokenPipeError, ConnectionResetError):
                 _log("download_disconnected", size=size)
             except OSError as exc:
                 _log("download_failed", errno=exc.errno, size=size)
+            finally:
+                download.close()
         else:
             self._err(404, "unknown endpoint")
 
@@ -310,21 +325,31 @@ class Handler(BaseHTTPRequestHandler):
                 remaining = length
                 _log("upload_started", size=length, overwrite=int(q.get("overwrite") != "0"))
                 try:
-                    with os.fdopen(fd, "wb") as output:
-                        while remaining:
-                            chunk = self.rfile.read(min(CHUNK, remaining))
-                            if not chunk:
-                                raise EOFError("incomplete upload body")
-                            output.write(chunk)
-                            remaining -= len(chunk)
-                        output.flush()
-                        os.fsync(output.fileno())
-                except (BrokenPipeError, ConnectionResetError, EOFError) as exc:
+                    previous_timeout = self.connection.gettimeout()
+                    self.connection.settimeout(UPLOAD_IDLE_TIMEOUT_SECONDS)
+                    try:
+                        with os.fdopen(fd, "wb") as output:
+                            while remaining:
+                                chunk = self.rfile.read(min(CHUNK, remaining))
+                                if not chunk:
+                                    raise EOFError("incomplete upload body")
+                                output.write(chunk)
+                                remaining -= len(chunk)
+                            output.flush()
+                            os.fsync(output.fileno())
+                    finally:
+                        self.connection.settimeout(previous_timeout)
+                except socket.timeout:
+                    _log("upload_failed", status=408, error="body_timeout", size=length)
+                    return self._err(408, "upload body timed out", "upload_timeout")
+                except (ConnectionError, EOFError):
                     _log("upload_failed", status=400, error="incomplete_body", size=length)
                     return self._err(400, "upload body ended before Content-Length", "incomplete_upload")
                 except OSError as exc:
                     if exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
                         return self._err(507, "storage ran out of space during upload", "insufficient_storage")
+                    if exc.errno in (errno.EACCES, errno.EPERM):
+                        return self._err(403, "permission denied while writing file", "storage_permission_denied")
                     _log("upload_failed", status=500, errno=exc.errno, size=length)
                     return self._err(500, "could not write uploaded file", "storage_error")
                 os.replace(tmp, target)
@@ -333,6 +358,8 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as exc:
                 if exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
                     return self._err(507, "insufficient free space for upload", "insufficient_storage")
+                if exc.errno in (errno.EACCES, errno.EPERM):
+                    return self._err(403, "permission denied while storing file", "storage_permission_denied")
                 _log("upload_failed", status=500, errno=exc.errno, size=length)
                 return self._err(500, "could not store uploaded file", "storage_error")
             finally:
@@ -371,6 +398,8 @@ class Handler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 return self._err(404, "parent directory not found", "parent_not_found")
             except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EPERM):
+                    return self._err(403, "permission denied", "storage_permission_denied")
                 _log("mkdir_failed", errno=exc.errno)
                 return self._err(500, "could not create directory", "storage_error")
         _log("mkdir_completed")

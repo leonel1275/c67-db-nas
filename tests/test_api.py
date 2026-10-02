@@ -44,7 +44,7 @@ class ApiTests(unittest.TestCase):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
         headers = {}
         if token:
-            headers["Authorization"] = "test-token-not-for-logs"
+            headers["Authorization"] = "Bearer " + c67core._state["token"]
         if cookie:
             headers["Cookie"] = cookie
         if isinstance(body, (dict, list)):
@@ -65,7 +65,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.json_request("PUT", "/api/nas/upload?path=a", b"x" * 17)[0], 413)
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
         conn.putrequest("PUT", "/api/nas/upload?path=missing-length")
-        conn.putheader("Authorization", "******")
+        conn.putheader("Authorization", "Bearer " + c67core._state["token"])
         conn.endheaders()
         self.assertEqual(conn.getresponse().status, 411)
         conn.close()
@@ -73,7 +73,8 @@ class ApiTests(unittest.TestCase):
         status, _, result = self.json_request("PUT", "/api/nas/upload?path=small.txt", b"hello")
         self.assertEqual(status, 201)
         self.assertEqual(result["size"], 5)
-        self.assertEqual(open(os.path.join(self.root, "small.txt"), "rb").read(), b"hello")
+        with open(os.path.join(self.root, "small.txt"), "rb") as uploaded:
+            self.assertEqual(uploaded.read(), b"hello")
         self.assertFalse(any(name.startswith(".c67-upload-") for name in os.listdir(self.root)))
 
     def test_free_space_error_and_path_traversal(self):
@@ -85,12 +86,29 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.json_request("GET", "/api/nas/list?path=../escape")[0], 400)
         self.assertFalse(os.path.exists(os.path.join(self.temp.name, "escape")))
 
+    def test_mkdir_list_delete_and_structured_auth_errors(self):
+        status, _, unauthorized = self.json_request(
+            "GET", "/api/nas/list", token=False
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(unauthorized["error"]["code"], "unauthorized")
+        self.assertEqual(self.request("POST", "/api/nas/mkdir?path=docs")[0], 201)
+        self.assertEqual(self.request("POST", "/api/nas/mkdir?path=docs")[0], 409)
+        self.assertEqual(self.request("PUT", "/api/nas/upload?path=docs%2Fnote.txt", b"note")[0], 201)
+        self.assertEqual(self.request("DELETE", "/api/nas/delete?path=docs")[0], 409)
+        self.assertEqual(self.request("DELETE", "/api/nas/delete?path=docs%2Fnote.txt")[0], 200)
+        self.assertEqual(self.request("DELETE", "/api/nas/delete?path=docs")[0], 200)
+
     def test_interrupted_upload_removes_temporary_file(self):
+        protected_path = os.path.join(self.root, "protected.txt")
+        with open(protected_path, "wb") as protected:
+            protected.write(b"previous-good-content")
         sock = socket.create_connection(("127.0.0.1", self.port), timeout=3)
         sock.sendall(
-            b"PUT /api/nas/upload?path=unfinished HTTP/1.1\r\n"
-            b"Host: localhost\r\nAuthorization: test-token-not-for-logs\r\n"
-            b"Content-Length: 12\r\n\r\nabc"
+            b"PUT /api/nas/upload?path=protected.txt HTTP/1.1\r\n"
+            b"Host: localhost\r\nAuthorization: Bearer "
+            + c67core._state["token"].encode()
+            + b"\r\nContent-Length: 12\r\n\r\nabc"
         )
         sock.shutdown(socket.SHUT_WR)
         sock.recv(4096)
@@ -98,19 +116,35 @@ class ApiTests(unittest.TestCase):
         deadline = time.time() + 2
         while time.time() < deadline and any(n.startswith(".c67-upload-") for n in os.listdir(self.root)):
             time.sleep(0.02)
-        self.assertFalse(os.path.exists(os.path.join(self.root, "unfinished")))
+        with open(protected_path, "rb") as protected:
+            self.assertEqual(protected.read(), b"previous-good-content")
+        self.assertFalse(any(n.startswith(".c67-upload-") for n in os.listdir(self.root)))
+
+    def test_idle_upload_times_out_and_releases_temporary_file(self):
+        with patch.object(c67core, "UPLOAD_IDLE_TIMEOUT_SECONDS", 0.1):
+            sock = socket.create_connection(("127.0.0.1", self.port), timeout=3)
+            sock.settimeout(3)
+            sock.sendall(
+                b"PUT /api/nas/upload?path=idle HTTP/1.1\r\n"
+                b"Host: localhost\r\nAuthorization: Bearer "
+                + c67core._state["token"].encode()
+                + b"\r\nContent-Length: 1\r\n\r\n"
+            )
+            response = sock.recv(4096)
+            sock.close()
+        self.assertIn(b"408", response)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "idle")))
         self.assertFalse(any(n.startswith(".c67-upload-") for n in os.listdir(self.root)))
 
     def test_no_overwrite_is_atomic_for_concurrent_requests(self):
-        self.request("PUT", "/api/nas/upload?path=shared.txt", b"original")
-
         def upload():
             return self.request("PUT", "/api/nas/upload?path=shared.txt&overwrite=0", b"replacement")[0]
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             statuses = list(pool.map(lambda _: upload(), range(2)))
         self.assertEqual(sorted(statuses), [201, 409])
-        self.assertEqual(open(os.path.join(self.root, "shared.txt"), "rb").read(), b"replacement")
+        with open(os.path.join(self.root, "shared.txt"), "rb") as uploaded:
+            self.assertEqual(uploaded.read(), b"replacement")
 
     def test_login_protects_web_app_and_reuses_cookie_for_api(self):
         status, _, body = self.request("GET", "/")
@@ -138,7 +172,11 @@ class ApiTests(unittest.TestCase):
                 c67core._log("test_event", result="x" * 80)
             files = [n for n in os.listdir(self.temp.name) if n.startswith("nas-api.log")]
             self.assertLessEqual(len(files), c67core.LOG_BACKUP_COUNT + 1)
-            logs = b"".join(open(os.path.join(self.temp.name, name), "rb").read() for name in files)
+            chunks = []
+            for name in files:
+                with open(os.path.join(self.temp.name, name), "rb") as log_file:
+                    chunks.append(log_file.read())
+            logs = b"".join(chunks)
             self.assertNotIn(b"test-token-not-for-logs", logs)
             self.assertNotIn(b"file-content", logs)
         finally:
