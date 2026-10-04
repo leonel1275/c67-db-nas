@@ -176,6 +176,7 @@ public class PgService extends Service {
                         .toString();
                 log(res);
                 setStatus("listo: PostgreSQL :" + PG_PORT + " | NAS API :" + API_PORT);
+                launchDockerVm();
             } catch (Throwable t) {
                 log("NAS API FAIL " + t);
                 setStatus("PostgreSQL OK; NAS API fallo: " + t.getMessage());
@@ -576,4 +577,25 @@ public class PgService extends Service {
             }
         }
     }
+
+    private void launchDockerVm() {
+        try {
+            log("Iniciando Docker VM (com.tuempresa.dockerphone)...");
+            Intent launchIntent = getPackageManager().getLaunchIntentForPackage("com.tuempresa.dockerphone");
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(launchIntent);
+                log("Docker VM lanzada exitosamente via getLaunchIntentForPackage");
+            } else {
+                Intent explicitIntent = new Intent();
+                explicitIntent.setClassName("com.tuempresa.dockerphone", "com.tuempresa.dockerphone.MainActivity");
+                explicitIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(explicitIntent);
+                log("Docker VM lanzada exitosamente via Intent explicito");
+            }
+        } catch (Throwable t) {
+            log("No se pudo autoiniciar Docker VM: " + t.getMessage());
+        }
+    }
+
 }
